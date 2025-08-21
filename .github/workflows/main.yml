@@ -1,0 +1,45 @@
+# .github/workflows/main.yml
+
+name: Scrape MALEE Stock Price
+
+on:
+  # ทำให้เราสามารถกดรันเองได้จากหน้า Actions เพื่อทดสอบ
+  workflow_dispatch:
+  # ตั้งเวลาให้รันอัตโนมัติ ทุกๆ 15 นาที
+  schedule:
+    - cron: '*/15 * * * *'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. เช็คเอาท์โค้ดใน Repository ของเราออกมา
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # 2. ติดตั้ง Python เวอร์ชัน 3.10
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. ติดตั้ง Google Chrome (ใช้วิธีเดียวกับที่ทำใน Colab)
+      - name: Install Google Chrome
+        run: |
+          wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f
+
+      # 4. ติดตั้งไลบรารี Python ที่จำเป็น
+      - name: Install Python dependencies
+        run: pip install selenium webdriver-manager
+
+      # 5. รันสคริปต์ scraper.py ของเรา
+      - name: Run scraper
+        run: python scraper.py
+
+      # 6. คอมมิตไฟล์ price.json ที่ได้กลับเข้า Repository อัตโนมัติ
+      - name: Commit and push if content changed
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "BOT: Update stock price"
+          file_pattern: price.json
