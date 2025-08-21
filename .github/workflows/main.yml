@@ -11,6 +11,10 @@ on:
 
 jobs:
   scrape:
+      # ---- เพิ่ม 2 บรรทัดนี้เข้ามาตรงนี้ ----
+    permissions:
+      contents: write
+    # ------------------------------------
     runs-on: ubuntu-latest
     steps:
       # 1. เช็คเอาท์โค้ดใน Repository ของเราออกมา
