@@ -1,4 +1,4 @@
-# scraper.py
+# scraper.py (เวอร์ชันอัปเดต เพิ่ม Change และ % Change)
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -7,18 +7,18 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 import json
-import time
+from datetime import datetime
+import pytz
 
 def scrape_malee_stock_price(url):
     """
-    Scrapes the stock price of MALEE from the SET website.
+    Scrapes the stock price and change data of MALEE from the SET website.
     """
-    # Options เหล่านี้จำเป็นมากสำหรับการรันในสภาพแวดล้อมที่ไม่มีหน้าจอแบบ GitHub Actions
     options = webdriver.ChromeOptions()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    options.add_argument("--window-size=1920,1080") # กำหนดขนาดหน้าจอเผื่อบางเว็บจำเป็น
+    options.add_argument("--window-size=1920,1080")
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
@@ -26,21 +26,47 @@ def scrape_malee_stock_price(url):
     scraped_data = None
     try:
         driver.get(url)
-        element_css_selector = 'div.value.text-white.mb-0.me-2.lh-1.stock-info'
         
-        # เพิ่มเวลารอเป็น 20 วินาที เพื่อความแน่นอน
+        # --- CSS Selectors สำหรับข้อมูลทั้งหมด ---
+        price_selector = 'div.value.text-white.mb-0.me-2.lh-1.stock-info'
+        # Selector สำหรับ h3 ที่ครอบข้อมูล change ทั้งหมด
+        change_container_selector = 'h3.d-flex.mb-0.pb-2'
+
+        # --- รอให้ element หลักปรากฏขึ้นก่อน ---
         WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, element_css_selector))
+            EC.presence_of_element_located((By.CSS_SELECTOR, price_selector))
         )
         
-        price_element = driver.find_element(By.CSS_SELECTOR, element_css_selector)
+        # --- ดึงข้อมูลราคา (เหมือนเดิม) ---
+        price_element = driver.find_element(By.CSS_SELECTOR, price_selector)
         price_text = price_element.text.strip()
         price = float(price_text.replace(',', ''))
 
+        # --- [เพิ่ม] ดึงค่า Change และ Percent Change ---
+        change_container = driver.find_element(By.CSS_SELECTOR, change_container_selector)
+        # ดึงค่า change จาก span ตัวแรก
+        change_value_text = change_container.find_element(By.CSS_SELECTOR, 'span:nth-of-type(1)').text.strip()
+        # ดึงค่า percent change จาก span ตัวที่สอง
+        percent_change_text = change_container.find_element(By.CSS_SELECTOR, 'span:nth-of-type(2)').text.strip()
+
+        # --- [เพิ่ม] ทำความสะอาดและแปลงข้อมูล ---
+        change_value = float(change_value_text)
+        # ลบวงเล็บและเครื่องหมาย % แล้วแปลงเป็น float
+        percent_change_value = float(percent_change_text.replace('(', '').replace(')', '').replace('%', ''))
+        
+        # --- จัดการเรื่องเวลา (เหมือนเดิม) ---
+        bkk_timezone = pytz.timezone('Asia/Bangkok')
+        utc_now = datetime.now(pytz.utc)
+        bkk_now = utc_now.astimezone(bkk_timezone)
+        formatted_timestamp = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
+
+        # --- [อัปเดต] เพิ่มข้อมูลใหม่ลงใน Dictionary ---
         scraped_data = {
             "symbol": "MALEE",
             "price": price,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            "change": change_value,           # <-- เพิ่มเข้ามา
+            "percent_change": percent_change_value, # <-- เพิ่มเข้ามา
+            "timestamp": formatted_timestamp
         }
     except Exception as e:
         print(f"An error occurred during scraping: {e}")
@@ -64,5 +90,4 @@ if __name__ == "__main__":
     
     result_data = scrape_malee_stock_price(target_url)
     
-    # บันทึกผลลัพธ์ลงไฟล์ price.json แทนการ print
     save_to_file(result_data)
