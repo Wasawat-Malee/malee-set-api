@@ -31,7 +31,7 @@ jobs:
           sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f
 
       - name: Install Python dependencies
-        run: pip install selenium webdriver-manager
+        run: pip install selenium webdriver-manager pytz
 
       - name: Run scraper
         run: python scraper.py
