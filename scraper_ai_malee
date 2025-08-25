@@ -1,224 +1,107 @@
-"""
-scraper_ai_malee.py
-แนวคิด: ใช้ Selenium เรนเดอร์หน้าเว็บ SET ของ MALEE แล้วให้ Gemini 1.5 Flash สกัดข้อมูล
-ออกมาเป็น JSON ตามสคีมา (ไม่ผูกกับ CSS selector)
-ผลลัพธ์สุดท้ายต้องเป็น:
-scraped_data = {
-    "symbol": "MALEE",
-    "price": <float>,
-    "change": <float>,
-    "percent_change": <float>,   # ไม่มีเครื่องหมาย %
-    "timestamp": "YYYY-MM-DD HH:MM:SS"  # Asia/Bangkok
-}
-
-เตรียมการ:
-  pip install selenium webdriver-manager pytz google-generativeai
-ต้องมีตัวแปรแวดล้อม:
-  GEMINI_API_KEY=<your_api_key>
-"""
-
 import os
 import json
-from datetime import datetime
-import pytz
+import mimetypes
+from typing import List, Union
 import google.generativeai as genai
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+# พยายามโหลดตัวแปรจากไฟล์ .env ถ้ามี (รองรับกรณี GitHub Actions เขียนไฟล์ .env มาให้)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    # ถ้าไม่ติดตั้ง python-dotenv ก็ข้ามไป ใช้ env ที่มีอยู่แทน
+    pass
 
 
-# -------------------------------
-# 1) ตั้งค่าการเรียกใช้ Gemini
-# -------------------------------
-# ใช้ API key จากตัวแปรแวดล้อม (ปลอดภัยกว่า hardcode)
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
-
-# เลือกโมเดล: gemini-1.5-flash-latest (เร็ว คุ้มค่า)
-MODEL_NAME = "gemini-1.5-flash-latest"
-
-# กำหนดสคีมาของ JSON ที่อยากให้โมเดลคืนมา (บังคับชนิดข้อมูล)
-RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "symbol": {"type": "string"},
-        "price": {"type": "number"},
-        "change": {"type": "number"},
-        "percent_change": {"type": "number"},
-    },
-    "required": ["symbol", "price", "change", "percent_change"],
-    "additionalProperties": False
-}
-
-# พรอมป์สกัดข้อมูล: อธิบายให้ชัดว่าต้องการอะไร และรูปแบบผลลัพธ์
-EXTRACTION_PROMPT = """
-คุณได้รับหน้าเว็บของตลาดหลักทรัพย์แห่งประเทศไทย (SET) เกี่ยวกับหุ้น MALEE
-งานของคุณคือสกัดค่าต่อไปนี้จากข้อมูลหน้าเว็บ (ข้อความที่มาจาก innerText และภาพสกรีนช็อต):
-
-- price: ราคาหุ้นปัจจุบันของ MALEE (ตัวเลขทศนิยม)
-- change: ค่าการเปลี่ยนแปลงแบบจำนวน (เช่น +0.10 หรือ -0.05) ให้คืนค่าเป็นตัวเลขทศนิยม (เช่น 0.10 หรือ -0.05)
-- percent_change: ค่าการเปลี่ยนแปลงแบบเปอร์เซ็นต์ (เช่น +0.70%) ให้คืนเป็นตัวเลขทศนิยม **ไม่ต้องใส่เครื่องหมาย %** (เช่น 0.70 หรือ -0.70)
-- symbol: ให้คืนเป็น "MALEE" เท่านั้น
-
-หลักการตัดสินใจ:
-1) ให้เชื่อมโยงค่าที่ใกล้เคียงกับชื่อสัญลักษณ์ "MALEE" และส่วนราคาปัจจุบัน/การเปลี่ยนแปลงล่าสุดบนหน้า
-2) ถ้าข้อความและภาพขัดแย้งกัน ให้เชื่อค่าที่ "แสดงเป็นราคาปัจจุบัน" มากที่สุด
-3) แปลงรูปแบบตัวเลขให้ถูกต้อง: เอาเครื่องหมาย % และวงเล็บออก, รองรับเครื่องหมายลบแบบ unicode
-4) คืนคำตอบเป็น JSON ตรงตามสคีมาที่กำหนดเท่านั้น
-"""
-
-
-# -------------------------------------------------------
-# 2) ฟังก์ชันช่วย: เรนเดอร์หน้าเว็บ SET แล้วดึง text + screenshot
-# -------------------------------------------------------
-def render_set_page(url: str, screenshot_path: str = "set_malee.png") -> tuple[str, str]:
+def _configure_genai():
     """
-    เปิดหน้าเว็บด้วย Chrome (headless) รอโหลดเสร็จ ดึง body.innerText และบันทึกสกรีนช็อต
-    ไม่ผูกกับ selector เฉพาะเจาะจง เพื่อลดการพังเมื่อ DOM เปลี่ยน
-
-    Returns:
-        (page_text, screenshot_path)
+    ตั้งค่า Gemini SDK โดยอ่านคีย์จากตัวแปรแวดล้อม GOOGLE_API_KEY
+    - ถ้าไม่มีคีย์ จะ raise ข้อผิดพลาด พร้อมข้อความอธิบาย
     """
-    # ตั้งค่า Chrome แบบ headless
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")           # headless โหมดใหม่ (เสถียรกว่า)
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1600,1200")
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "ไม่พบ GOOGLE_API_KEY ใน environment/.env\n"
+            "บน GitHub Actions คุณสร้าง .env แล้ว แต่ Python จะไม่โหลดอัตโนมัติ "
+            "จึงต้องเรียก load_dotenv() (ทำไว้ให้แล้วด้านบน) "
+            "หรือเปลี่ยนไป export เป็น env ด้วย $GITHUB_ENV แทน"
+        )
+    genai.configure(api_key=api_key)
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
 
+def _to_image_part(item: Union[str, dict]) -> dict:
+    """
+    แปลง input แต่ละตัวให้เป็นรูปแบบ 'part' ที่ Gemini เข้าใจ
+    รองรับ:
+      - str: พาธไฟล์รูปภาพ เช่น 'screenshots/a.png'
+      - dict: part ที่เตรียมมาแล้ว เช่น {"mime_type": "image/png", "data": b"..."}
+    """
+    if isinstance(item, dict):
+        # คาดว่า caller เตรียม part มาแล้ว
+        if "mime_type" in item and "data" in item:
+            return item
+        raise TypeError("dict รูปต้องประกอบด้วยคีย์ 'mime_type' และ 'data'")
+
+    if isinstance(item, str):
+        # กรณีเป็นพาธไฟล์ -> เดา MIME type แล้วอ่าน bytes
+        mime, _ = mimetypes.guess_type(item)
+        if not mime:
+            # ถ้าเดาไม่ได้ ให้ fallback เป็น image/png
+            mime = "image/png"
+        with open(item, "rb") as f:
+            data = f.read()
+        return {"mime_type": mime, "data": data}
+
+    raise TypeError("images ต้องเป็นพาธไฟล์ (str) หรือ part (dict) ที่มี mime_type+data เท่านั้น")
+
+
+def analyze_images_with_gemini(images: List[Union[str, dict]], prompt: str) -> str:
+    """
+    ส่งรูปภาพและ Prompt ไปให้ Gemini วิเคราะห์
+
+    พารามิเตอร์:
+      - images: รายการรูปภาพ (พาธไฟล์ หรือ part ที่เตรียมไว้แล้ว)
+      - prompt: คำสั่ง/คำอธิบายสิ่งที่อยากให้โมเดลทำ
+
+    คืนค่า:
+      - สตริงข้อความผลลัพธ์จากโมเดล (cleaned)
+    """
+    print("กำลังส่งข้อมูลให้ Gemini API วิเคราะห์...")
+
+    # 1) ตั้งค่า SDK ด้วย API คีย์จาก GOOGLE_API_KEY
+    _configure_genai()
+
+    # 2) เตรียมโมเดล (ใช้รุ่นเร็ว คุ้มค่า)
+    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+
+    # 3) สร้าง content parts: เริ่มด้วย prompt (เป็น text) แล้วตามด้วยรูปทั้งหมดในรูปแบบ part
+    parts = [prompt] + [_to_image_part(img) for img in images]
+
+    # 4) เรียกโมเดล (ตั้ง temperature=0 เพื่อลดความสุ่มของผลลัพธ์)
     try:
-        driver.get(url)
-
-        # รอให้หน้าโหลดสมบูรณ์ (document.readyState == 'complete')
-        WebDriverWait(driver, 30).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
+        response = model.generate_content(
+            parts,
+            generation_config={"temperature": 0}
         )
 
-        # รอให้มี body ปรากฏ (อย่างน้อยให้มีโครงสร้างหน้าพร้อม)
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        # 5) ดึงผลลัพธ์เป็นข้อความ
+        text = (response.text or "").strip()
 
-        # ดึงข้อความที่มองเห็นทั้งหมดจาก body (ไม่อิง selector เฉพาะ)
-        page_text = driver.find_element(By.TAG_NAME, "body").text
+        # 6) ทำความสะอาดผลลัพธ์: ตัดกรณีที่ตอบเป็นโค้ดบล็อค ```json ... ```
+        def _strip_code_fences(s: str) -> str:
+            s = s.strip()
+            # รองรับทั้ง ```json และ ``` เฉย ๆ
+            if s.startswith("```json"):
+                s = s[len("```json"):].strip()
+            if s.startswith("```"):
+                s = s[len("```"):].strip()
+            if s.endswith("```"):
+                s = s[:-3].strip()
+            return s
 
-        # บันทึกสกรีนช็อตทั้งหน้า (โมเดลจะเห็นบริบทเชิงภาพ)
-        driver.save_screenshot(screenshot_path)
+        cleaned_text = _strip_code_fences(text)
+        return cleaned_text
 
-        return page_text, screenshot_path
-
-    finally:
-        driver.quit()
-
-
-# -------------------------------------------------------
-# 3) ฟังก์ชันเรียก Gemini พร้อม JSON schema (Structured Output)
-# -------------------------------------------------------
-def extract_fields_with_gemini(page_text: str, screenshot_path: str) -> dict:
-    """
-    ส่ง prompt + ข้อความหน้าเว็บ + รูปสกรีนช็อต เข้า Gemini
-    และบังคับให้โมเดลตอบเป็น JSON ตามสคีมาที่กำหนด
-    """
-    # โหลดรูปเป็น "part" ให้โมเดลเห็นภาพด้วย
-    image_part = {
-        "mime_type": "image/png",
-        "data": open(screenshot_path, "rb").read()
-    }
-
-    model = genai.GenerativeModel(MODEL_NAME)
-
-    # ตั้งค่าให้โมเดลตอบเป็น JSON และเคารพสคีมา
-    generation_config = {
-        "temperature": 0,  # เน้นความแม่น/เสถียร (ไม่สุ่ม)
-        "response_mime_type": "application/json",
-        "response_schema": RESPONSE_SCHEMA
-    }
-
-    # เรียกโมเดลด้วย prompt + ข้อความ + รูป
-    # หมายเหตุ: โมเดล 1.5 รองรับ multi-modal input
-    response = model.generate_content(
-        contents=[
-            EXTRACTION_PROMPT,
-            # ส่งข้อความดิบของหน้านี้ให้โมเดลอ่าน
-            {"mime_type": "text/plain", "text": page_text},
-            # ส่งภาพสกรีนช็อต
-            image_part
-        ],
-        generation_config=generation_config,
-        safety_settings=None,  # ใช้ค่าเริ่มต้นก็ได้
-    )
-
-    # response.text จะเป็นสตริง JSON ที่ตรงสคีมา
-    data = json.loads(response.text)
-
-    # ทำความสะอาดผลลัพธ์เล็กน้อย (กันกรณีโมเดลส่ง string ตัวเลขมา—ปกติไม่ควรเพราะบังคับ schema แล้ว)
-    def to_float(x):
-        if isinstance(x, (int, float)):
-            return float(x)
-        if isinstance(x, str):
-            s = x.strip().replace(",", "").replace("%", "").replace("(", "").replace(")", "").replace("−", "-")
-            return float(s)
-        raise ValueError(f"Cannot convert to float: {x}")
-
-    data["symbol"] = "MALEE"  # บังคับให้ถูกต้องตามที่ต้องการ
-    data["price"] = to_float(data["price"])
-    data["change"] = to_float(data["change"])
-    data["percent_change"] = to_float(data["percent_change"])  # ไม่ควรมี % แล้ว
-
-    return data
-
-
-# -------------------------------------------------------
-# 4) ฟังก์ชันรวมผลลัพธ์ + ใส่ timestamp Asia/Bangkok
-# -------------------------------------------------------
-def build_scraped_data(extracted: dict) -> dict:
-    """
-    เติม timestamp โซน Asia/Bangkok แล้วคืนโครงสร้าง scraped_data ตามที่ต้องการ
-    """
-    bkk_tz = pytz.timezone("Asia/Bangkok")
-    ts = datetime.now(bkk_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-    scraped_data = {
-        "symbol": "MALEE",
-        "price": extracted["price"],
-        "change": extracted["change"],
-        "percent_change": extracted["percent_change"],
-        "timestamp": ts,
-    }
-    return scraped_data
-
-
-# -------------------------------------------------------
-# 5) ฟังก์ชันเซฟไฟล์ JSON
-# -------------------------------------------------------
-def save_to_file(data: dict, filename: str = "price.json"):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    print(f"Data saved to {filename}")
-
-
-# -------------------------------------------------------
-# 6) Main
-# -------------------------------------------------------
-if __name__ == "__main__":
-    url = "https://www.set.or.th/th/market/product/stock/quote/MALEE/price"
-    print(f"Render page: {url}")
-
-    # 6.1 เรนเดอร์หน้า + เอา text กับสกรีนช็อต
-    page_text, screenshot_file = render_set_page(url)
-
-    # 6.2 เรียก Gemini ให้สกัดข้อมูลตามพรอมป์
-    extracted = extract_fields_with_gemini(page_text, screenshot_file)
-
-    # 6.3 เติม timestamp และจัดรูปแบบผลลัพธ์สุดท้าย
-    scraped_data = build_scraped_data(extracted)
-
-    # 6.4 แสดงผลลัพธ์ตัวอย่าง และบันทึกไฟล์
-    print(json.dumps(scraped_data, ensure_ascii=False, indent=2))
-    save_to_file(scraped_data, "price.json")
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาดในการเรียกใช้ Gemini API: {e}")
+        return None
