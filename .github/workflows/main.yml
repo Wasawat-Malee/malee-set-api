@@ -33,8 +33,11 @@ jobs:
       - name: Install Python dependencies
         run: pip install selenium webdriver-manager pytz
 
+      - name: Create .env file
+        run: echo "GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}" > .env
+        
       - name: Run scraper
-        run: python scraper.py
+        run: python scraper_ai_malee.py
 
       - name: Commit and push if content changed
         uses: stefanzweifel/git-auto-commit-action@v5
